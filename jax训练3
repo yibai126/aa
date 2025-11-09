@@ -2,56 +2,51 @@ import jax
 import jax.numpy as jnp
 from flax import nnx
 import optax
-import tensorflow_datasets as tfds
+import numpy as np
 
-# 模型
-class CNN(nnx.Module):
+# 纯NumPy数据加载
+(x_train, y_train), (x_test, y_test) = jax.tree_util.tree_map(
+    np.array, np.load('cifar10.npz', allow_pickle=True).values()
+)
+
+# 最简模型
+class Model(nnx.Module):
     def __init__(self):
-        self.conv1 = nnx.Conv(32, 3)  # 修正参数顺序
-        self.conv2 = nnx.Conv(64, 3)
-        self.linear = nnx.Dense(10)
-    
+        self.conv1 = nnx.Conv(3, 16, 3)
+        self.conv2 = nnx.Conv(16, 32, 3)
+        self.fc = nnx.Linear(32*6*6, 10)
     def __call__(self, x):
         x = jax.nn.relu(self.conv1(x))
-        x = nnx.avg_pool(x, (2, 2))
+        x = nnx.avg_pool(x, 2)
         x = jax.nn.relu(self.conv2(x))
-        x = nnx.avg_pool(x, (2, 2))
-        x = x.reshape(x.shape[0], -1)
-        return self.linear(x)
-
-# 数据
-train_data = tfds.as_numpy(tfds.load('cifar10', split='train', batch_size=128))
-test_data = tfds.as_numpy(tfds.load('cifar10', split='test', batch_size=128))
+        x = nnx.avg_pool(x, 2)
+        return self.fc(x.reshape(x.shape[0], -1))
 
 # 初始化
-model = CNN()
-params = model.init(nnx.Rngs(0), jnp.ones([1, 32, 32, 3]))
-optimizer = nnx.Optimizer(params, optax.adam(1e-3))
+model = Model()
+optimizer = nnx.Optimizer(model, optax.adam(1e-3))
 
-# 训练
-for epoch in range(5):
-    # 训练
-    for batch in train_data:
-        x, y = batch['image'].astype(jnp.float32) / 255.0, batch['label']
-        
-        def loss_fn(p):
-            logits = model.apply(p, x)
-            return optax.softmax_cross_entropy_with_integer_labels(logits, y).mean()
-        
-        loss, grads = nnx.value_and_grad(loss_fn)(optimizer.target)
-        optimizer.update(grads)
+# 训练步骤
+@jax.jit
+def train_step(x, y):
+    def loss_fn(model):
+        return optax.softmax_cross_entropy_with_integer_labels(model(x), y).mean()
+    loss, grads = nnx.value_and_grad(loss_fn)(model)
+    optimizer.update(grads)
+    return loss
+
+# 训练循环
+for epoch in range(3):
+    # 简单batch生成
+    indices = np.random.permutation(len(x_train))[:512]
+    x_batch = x_train[indices] / 255.0
+    y_batch = y_train[indices].flatten()
     
-    # 测试
-    correct = total = 0
-    for batch in test_data:
-        x, y = batch['image'].astype(jnp.float32) / 255.0, batch['label']
-        logits = model.apply(optimizer.target, x)
-        correct += (jnp.argmax(logits, -1) == y).sum()
-        total += y.size
+    loss = train_step(x_batch, y_batch)
     
-    acc = correct / total
-    print(f'Epoch {epoch+1}, Test Acc: {acc:.3f}')
+    # 快速测试
+    test_acc = (jnp.argmax(model(x_test[:1000]/255.0), -1) == y_test[:1000].flatten()).mean()
+    print(f'Epoch {epoch+1}, Loss: {loss:.3f}, Acc: {test_acc:.3f}')
     
-    if acc > 0.5:
-        print('Done!')
+    if test_acc > 0.5:
         break
