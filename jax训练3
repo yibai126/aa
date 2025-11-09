@@ -1,0 +1,57 @@
+import jax
+import jax.numpy as jnp
+from flax import nnx
+import optax
+import tensorflow_datasets as tfds
+
+# 模型
+class CNN(nnx.Module):
+    def __init__(self):
+        self.conv1 = nnx.Conv(32, 3)  # 修正参数顺序
+        self.conv2 = nnx.Conv(64, 3)
+        self.linear = nnx.Dense(10)
+    
+    def __call__(self, x):
+        x = jax.nn.relu(self.conv1(x))
+        x = nnx.avg_pool(x, (2, 2))
+        x = jax.nn.relu(self.conv2(x))
+        x = nnx.avg_pool(x, (2, 2))
+        x = x.reshape(x.shape[0], -1)
+        return self.linear(x)
+
+# 数据
+train_data = tfds.as_numpy(tfds.load('cifar10', split='train', batch_size=128))
+test_data = tfds.as_numpy(tfds.load('cifar10', split='test', batch_size=128))
+
+# 初始化
+model = CNN()
+params = model.init(nnx.Rngs(0), jnp.ones([1, 32, 32, 3]))
+optimizer = nnx.Optimizer(params, optax.adam(1e-3))
+
+# 训练
+for epoch in range(5):
+    # 训练
+    for batch in train_data:
+        x, y = batch['image'].astype(jnp.float32) / 255.0, batch['label']
+        
+        def loss_fn(p):
+            logits = model.apply(p, x)
+            return optax.softmax_cross_entropy_with_integer_labels(logits, y).mean()
+        
+        loss, grads = nnx.value_and_grad(loss_fn)(optimizer.target)
+        optimizer.update(grads)
+    
+    # 测试
+    correct = total = 0
+    for batch in test_data:
+        x, y = batch['image'].astype(jnp.float32) / 255.0, batch['label']
+        logits = model.apply(optimizer.target, x)
+        correct += (jnp.argmax(logits, -1) == y).sum()
+        total += y.size
+    
+    acc = correct / total
+    print(f'Epoch {epoch+1}, Test Acc: {acc:.3f}')
+    
+    if acc > 0.5:
+        print('Done!')
+        break
